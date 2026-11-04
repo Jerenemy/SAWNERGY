@@ -18,8 +18,17 @@
 !src/sawnergy/visual/
 !src/sawnergy/visual/*.py
 # ----------------------------
+!src/sawnergy/md/
+!src/sawnergy/md/*.py
+# ----------------------------
 !tests/
 !tests/*.py
+# ----------------------------
+!scripts/
+!scripts/*.py
+# ----------------------------
+!docs/
+!docs/*.md
 # ----------------------------
 !CICD/
 !CICD/*.py
