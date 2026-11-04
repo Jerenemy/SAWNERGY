@@ -451,3 +451,76 @@ def embed_runs(model, frames_by_run: list[np.ndarray], *,
             H = model.encode_frames(x)
             out.append(model.encode_trajectory(H, t).cpu().numpy()[0])
     return np.stack(out)
+
+
+# ---------------------------------------------------------------------------
+# metric learning on the trajectory latent (pipeline document section 7 C)
+# ---------------------------------------------------------------------------
+
+def build_triplets(owners: np.ndarray, rng, *, max_triplets: int = 4096
+                   ) -> np.ndarray:
+    """Triplets of window indices: (anchor, positive, negative).
+
+    Owner strings are ``"<system>|<condition>|<replicate>"``. A positive shares
+    the anchor's system *and* condition but comes from a **different
+    replicate**; a negative shares the system and differs in condition.
+
+    Both halves of that definition matter. Drawing the positive from a
+    different replicate is what forces the latent to be invariant to run-to-run
+    variation rather than merely to time; drawing the negative from the same
+    system is what stops the model from solving the task by recognising which
+    protein it is looking at, which is free and useless.
+
+    Returns:
+        ``(n, 3)`` integer array; may be shorter than ``max_triplets``.
+    """
+    parts = np.array([o.split("|") for o in owners])
+    if parts.shape[1] < 3:
+        raise ValueError("owner ids must be '<system>|<condition>|<replicate>'")
+    system, cond, rep = parts[:, 0], parts[:, 1], parts[:, 2]
+
+    by_sys_cond: dict = {}
+    by_sys: dict = {}
+    for i in range(len(owners)):
+        by_sys_cond.setdefault((system[i], cond[i]), []).append(i)
+        by_sys.setdefault(system[i], set()).add(cond[i])
+
+    out = []
+    keys = [k for k, v in by_sys_cond.items() if len(v) >= 2
+            and len(by_sys[k[0]]) >= 2]
+    if not keys:
+        return np.zeros((0, 3), dtype=np.int64)
+    for _ in range(max_triplets):
+        s, c = keys[rng.integers(len(keys))]
+        pool = by_sys_cond[(s, c)]
+        a = pool[rng.integers(len(pool))]
+        # positive: same system+condition, DIFFERENT replicate
+        cand = [i for i in pool if rep[i] != rep[a]]
+        if not cand:
+            continue
+        p = cand[rng.integers(len(cand))]
+        # negative: same system, different condition
+        other = [cc for cc in by_sys[s] if cc != c]
+        nc = other[rng.integers(len(other))]
+        npool = by_sys_cond.get((s, nc), [])
+        if not npool:
+            continue
+        n = npool[rng.integers(len(npool))]
+        out.append((a, p, n))
+    return np.asarray(out, dtype=np.int64)
+
+
+def triplet_loss(z, triplets, *, margin: float = 1.0):
+    """Margin triplet loss on trajectory embeddings.
+
+    Optimises ``d(z_a, z_p) < d(z_a, z_n) + margin`` -- which is the separation
+    ratio that sets the replicate budget, targeted directly instead of hoped
+    for as a by-product of reconstruction.
+    """
+    torch = _torch()
+    if len(triplets) == 0:
+        return z.sum() * 0.0
+    a, p, n = triplets[:, 0], triplets[:, 1], triplets[:, 2]
+    d_pos = (z[a] - z[p]).pow(2).sum(-1).clamp(min=1e-12).sqrt()
+    d_neg = (z[a] - z[n]).pow(2).sum(-1).clamp(min=1e-12).sqrt()
+    return torch.relu(d_pos - d_neg + margin).mean()

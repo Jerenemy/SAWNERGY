@@ -30,7 +30,8 @@ from .manifest import (Corpus, CorpusError, CorpusReport, Independence, Role,
                        Run, MIN_REPLICATES, MIN_INDEPENDENCE)
 from .readers import Frames, MdCathReader
 from .features import (RunDescriptor, contact_map, frame_tensor,
-                       frame_vectors, pair_distances, run_descriptor,
+                       frame_vectors, pair_distances, patch_frame_vectors,
+                       patch_neighbourhoods, patch_vectors, run_descriptor,
                        seq_separation_mask)
 from .stats import (Discriminability, VarianceComponents, autocorrelation_time,
                     leave_one_replicate_out, replicates_required,
@@ -42,7 +43,8 @@ from .encoder import (PCAEmbedder, TrainConfig, TrajectorySetEncoder,
                       train_frame_autoencoder)
 from .autoencoder import (AEConfig, FitConfig, StageReport,
                           build_nested_autoencoder, build_time_encoding,
-                          embed_runs, fit_nested, make_windows, nested_loss)
+                          build_triplets, embed_runs, fit_nested, make_windows,
+                          nested_loss, triplet_loss)
 from .validate import (Gate, GateReport, replicate_splits, run_gates,
                        gate_corpus, gate_disentangled, gate_effect_size,
                        gate_features, gate_replicate_noise, gate_separability,
@@ -59,7 +61,8 @@ __all__ = [
     "Frames", "MdCathReader",
     # features
     "RunDescriptor", "contact_map", "frame_tensor", "frame_vectors",
-    "pair_distances",
+    "pair_distances", "patch_frame_vectors", "patch_neighbourhoods",
+    "patch_vectors",
     "run_descriptor", "seq_separation_mask",
     # stats
     "Discriminability", "VarianceComponents", "autocorrelation_time",
@@ -73,7 +76,8 @@ __all__ = [
     "build_frame_autoencoder", "encode_frames", "train_frame_autoencoder",
     # autoencoder
     "AEConfig", "FitConfig", "StageReport", "build_nested_autoencoder",
-    "build_time_encoding", "embed_runs", "fit_nested", "make_windows",
+    "build_time_encoding", "build_triplets", "embed_runs", "fit_nested",
+    "make_windows", "triplet_loss",
     "nested_loss",
     # validate
     "Gate", "GateReport", "replicate_splits", "run_gates", "gate_corpus",

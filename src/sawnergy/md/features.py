@@ -204,3 +204,83 @@ def frame_vectors(frames: Frames, *, r0: float = CONTACT_R0,
     keep = seq_separation_mask(n, min_sep)[iu]
     c = contact_map(ca, r0=r0, beta=beta)
     return c[:, iu[0], iu[1]][:, keep].astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# size-invariant patches: the key to pooling data across different proteins
+# ---------------------------------------------------------------------------
+
+#: Residues per spatial patch, including the centre.
+PATCH_K = 16
+
+
+def patch_neighbourhoods(ca: np.ndarray, k: int = PATCH_K) -> np.ndarray:
+    """For each residue, the indices of its ``k`` nearest residues.
+
+    Neighbours are chosen once per run from the **time-averaged** structure,
+    not per frame. A patch therefore keeps its identity across the trajectory,
+    so a change in its contact pattern reflects the dynamics rather than a
+    reshuffling of which residues are being looked at.
+
+    Spatial rather than sequence-local on purpose: the Y220C cleft is lined by
+    residues 145-157 and 220-230, which are far apart in sequence and adjacent
+    in space. A sequence window would miss exactly the contacts that matter.
+
+    Args:
+        ca: ``(T, N, 3)`` residue coordinates.
+        k: Neighbourhood size including the centre residue.
+
+    Returns:
+        ``(N, k)`` integer indices, each row starting with the centre.
+    """
+    mean = ca.mean(axis=0)
+    d = np.linalg.norm(mean[:, None, :] - mean[None, :, :], axis=-1)
+    n = d.shape[0]
+    k = min(k, n)
+    return np.argsort(d, axis=1)[:, :k].astype(np.int32)
+
+
+def patch_vectors(frames: "Frames", *, k: int = PATCH_K, r0: float = CONTACT_R0,
+                  beta: float = CONTACT_BETA, burn_in: float = 0.1,
+                  residues: np.ndarray | None = None) -> np.ndarray:
+    """Fixed-size contact patches, one per residue per frame.
+
+    This is what makes cross-protein pretraining possible: the output width
+    depends only on ``k``, never on the size of the protein, so patches from
+    domains of 51 and 200 residues live in the same feature space and can be
+    pooled into one training corpus.
+
+    Args:
+        frames: One run.
+        k: Neighbourhood size.
+        residues: Optional subset of centre residues (for subsampling).
+
+    Returns:
+        ``(T, n_centres, k*(k-1)/2)`` float32.
+    """
+    ca = frames.ca_coords()
+    start = int(round(burn_in * ca.shape[0]))
+    ca = ca[start:]
+    nb = patch_neighbourhoods(ca, k)
+    if residues is not None:
+        nb = nb[np.asarray(residues)]
+    kk = nb.shape[1]
+    iu = np.triu_indices(kk, k=1)
+
+    sub = ca[:, nb, :]                                  # (T, C, k, 3)
+    diff = sub[:, :, :, None, :] - sub[:, :, None, :, :]
+    d = np.sqrt((diff ** 2).sum(-1) + 1e-12)            # (T, C, k, k)
+    c = 1.0 / (1.0 + np.exp(np.clip(beta * (d - r0), -60.0, 60.0)))
+    return c[:, :, iu[0], iu[1]].astype(np.float32)
+
+
+def patch_frame_vectors(patches: np.ndarray) -> np.ndarray:
+    """Pool ``(T, C, P)`` patches into a size-invariant ``(T, 2P)`` frame vector.
+
+    Mean and sd across residues. Pooling discards which residue is where, so
+    this is the right representation for *pretraining* across proteins but a
+    lossy one for a single point mutation; within one protein the per-residue
+    form should be preferred, since there the residue count is fixed.
+    """
+    return np.concatenate([patches.mean(axis=1), patches.std(axis=1)],
+                          axis=-1).astype(np.float32)

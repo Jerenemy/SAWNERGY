@@ -371,6 +371,97 @@ learned embedder therefore needs ≥ 6 replicates per cell just to stay testable
 
 ---
 
+## 9. Scaling the data: five experiments, one conclusion
+
+Section 8 found the nested autoencoder losing to PCA and blamed too few
+independent runs. That diagnosis was tested by raising the run count 16-fold
+and then, when that was not enough, by changing the objective. Five regimes,
+all scored by separation ratio on the hardest (adjacent-temperature) contrast,
+against a PCA baseline fitted on the same runs.
+
+### 9.1 More data
+
+mdCATH holds 5,398 domains x 25 runs ~ 135,000 runs. Three domains had been
+used. Fifty were downloaded (12 GB, **1,250 runs**).
+
+The obstacle to using them was that pair-contact features have a width set by
+the protein's residue count, so domains could not be pooled.
+`features.patch_vectors` removes it: for each residue, the contact submatrix
+over its *k* nearest neighbours in space (not in sequence -- the Y220C cleft
+is lined by residues 145-157 and 220-230, adjacent in space and far apart in
+sequence). Width depends only on *k*, so every protein shares a feature space.
+Verified constant at 120 dims across domains of 50-57 residues.
+
+### 9.2 Results
+
+| # | Regime | Runs for trajectory encoder | S1 / S2 / S3 held-out R² | sep AE | sep PCA |
+|---|---|---|---|---|---|
+| 1 | no pretraining | 15 | +0.29 / +0.31 / +0.02 | 0.47 | 0.74 |
+| 2 | frame encoder pretrained across 42 domains | 15 | +0.48…0.64 / **neg** / **neg** | 1.09 | 1.52 |
+| 3 | both levels trained across 42 domains | **1,050** | **+0.76 / +0.54 / +0.42** | 0.63 | 0.73 |
+| 4 | regime 3 + triplet loss | 1,050 | +0.78 / +0.53 / +0.44 | 0.66 | 0.73 |
+| 5 | regime 4 + per-domain fine-tuning | 1,050 + 15 | — | 0.89 | 1.45 |
+
+(PCA differs between rows because the evaluation sets differ — zero-shot rows
+score all 25 runs, fine-tuned rows only held-out runs. Only the AE-vs-PCA
+comparison *within* a row is meaningful. The AE loses every row.)
+
+**Data scaling decisively fixed reconstruction.** Regime 2 -> 3 took the
+trajectory stages from negative held-out R² to +0.54 and +0.42, measured on
+200 runs from 8 domains the model never saw. The nested autoencoder genuinely
+works as an autoencoder now, and generalises across proteins.
+
+**It did not fix discrimination.** Separation stayed at or below the linear
+baseline in all five regimes.
+
+**The triplet objective helped, measurably, but not enough.** Regime 3 -> 4
+left reconstruction unchanged while mean ICC on the latent rose from **0.116
+to 0.299** and leave-one-run-out accuracy from 0.32 to 0.39. The metric
+objective does what it claims; it simply does not close a gap this size.
+
+**Fine-tuning made it worse** relative to the baseline (beats PCA on 1/8
+domains rather than 4/8): with 15 runs, per-domain adaptation overfits while
+PCA on the same 15 does not.
+
+### 9.3 Why — and what it means for p53
+
+The pooling that made cross-protein data usable is the same step that costs
+the discriminative signal. `patch_frame_vectors` averages patch embeddings
+over residues, so the frame representation knows *what kinds of local
+environments are present* but not *which residue is where*. PCA on full pair
+descriptors keeps residue identity throughout. For telling conditions apart in
+one protein, residue identity is most of the signal.
+
+So the generality that unlocked a 16-fold data increase is precisely what
+makes the representation worse at the job. That is a real tension, not a
+tuning failure, and it has a direct consequence:
+
+**For p53, do not use cross-protein pretraining.** WT and Y220C are the same
+protein with the same residue numbering, so the constraint that forced pooling
+does not apply. Use full residue-pair descriptors directly, where every
+contact keeps its identity. On everything measured here, **PCA over
+mean-contact + contact-fluctuation descriptors is the best trajectory
+representation available**, and the nested autoencoder should not be put in
+front of it on the strength of architecture alone.
+
+The autoencoder keeps its value where cross-protein transfer is the point --
+reconstruction R² 0.42-0.76 on unseen proteins is a real result, and a
+pretrained patch encoder is a reasonable featuriser. It is not currently the
+right scoring stack for Y220C rescue.
+
+### 9.4 Caveats
+
+- All 50 domains are 50-57 residues, a consequence of selecting files by size.
+  p53 DBD is ~200 residues; transfer to that scale is untested.
+- The fine-tuned evaluation holds out 2 replicates per condition, so the sham
+  gate **could not run** there (it needs >= 4). It passed at FPR 0.000 in the
+  zero-shot evaluation, which keeps 5. This is the >= 6 replicates-per-cell
+  floor from section 8.3 showing up again.
+- Separation is measured on the single hardest contrast. The triplet gain is
+  clearer in ICC, which uses all five conditions.
+
+---
+
 ## 7. Status
 
 | Component | State |
@@ -383,15 +474,16 @@ learned embedder therefore needs ≥ 6 replicates per cell just to stay testable
 | `WTReference`, `rescue_score` | done, tested |
 | `ThermalAxis`, `thermal_shift` | implemented, **fails validation (§4.3)** |
 | PCA baseline embedder | done |
-| Nested symmetric AE (time-stamped) | done, tested (15 tests), **loses to PCA — see §8** |
+| Nested symmetric AE (time-stamped) | done, tested (15 tests); reconstructs well cross-protein, **still loses to PCA on discrimination — §8, §9** |
+| Cross-protein patch features + pretraining | done; 50 domains / 1,250 runs |
+| Triplet metric learning | done; ICC 0.116 → 0.299, insufficient alone |
 | p53 trajectories | **not generated** — no MD engine installed |
 
 Next, in order:
 
-1. **Add the metric-learning objective** (plan §7 Option C, triplet over
-   replicates). Pure reconstruction has now been tested and does not produce a
-   discriminative latent (§8.2); this is the evidence-backed next step, not a
-   speculative one.
+1. **Use PCA over full residue-pair descriptors as the p53 representation.**
+   It wins every comparison run so far (§9.2) and needs no pretraining. Drop
+   cross-protein pooling for p53, where residue numbering is shared (§9.3).
 2. **Fix the thermal axis** — monotone/sigmoidal rather than linear, denser
    ladder (§4.3).
 3. **Raise the replicate floor to ≥ 6 per cell**, below which held-out
