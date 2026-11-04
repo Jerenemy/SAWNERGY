@@ -186,3 +186,21 @@ def frame_tensor(frames: Frames, *, r0: float = CONTACT_R0,
         else:
             raise ValueError(f"unknown channel {ch!r}")
     return np.stack(out, axis=-1).astype(np.float32)
+
+
+def frame_vectors(frames: Frames, *, r0: float = CONTACT_R0,
+                  beta: float = CONTACT_BETA, min_sep: int = SEQ_SEPARATION,
+                  burn_in: float = 0.1) -> np.ndarray:
+    """Per-frame flattened contact vector, the input to the frame autoencoder.
+
+    Returns:
+        ``(T, P)`` where ``P`` is the number of residue pairs kept.
+    """
+    ca = frames.ca_coords()
+    start = int(round(burn_in * ca.shape[0]))
+    ca = ca[start:]
+    n = ca.shape[1]
+    iu = np.triu_indices(n, k=1)
+    keep = seq_separation_mask(n, min_sep)[iu]
+    c = contact_map(ca, r0=r0, beta=beta)
+    return c[:, iu[0], iu[1]][:, keep].astype(np.float32)

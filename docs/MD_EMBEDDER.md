@@ -278,6 +278,99 @@ so both halves of the programme share inputs.
 
 ---
 
+## 8. The nested symmetric autoencoder (plan §3–§5)
+
+`sawnergy.md.autoencoder` implements the nested architecture with time-stamped
+units:
+
+```
+X_1..X_T --E_f--> h_1..h_T --E_tau--> z --D_tau--> h_hat --D_f--> X_hat
+```
+
+Every frame enters the trajectory encoder carrying its own normalised
+timestep, and the trajectory decoder is **queried by timestep**:
+`D_tau(z, t) -> h_t_hat`. That is what makes the halves genuine mirrors — the
+decoder reconstructs a specific indexed unit rather than emitting an
+unlabelled bag — and it is why the stamp is a first-class input rather than a
+positional afterthought. Layer widths are mirrored exactly (`D_f` reverses
+`E_f`, `D_tau` reverses `E_tau`), and `tests/test_autoencoder.py` checks both
+the mirroring and that the decoder's output actually changes with `t`.
+
+Three losses, one per nesting level: frame-only, h-space, and end-to-end.
+Training is the plan's three-stage schedule (frame AE → trajectory AE on frozen
+embeddings → joint fine-tune), with validation on **held-out runs** after each
+stage.
+
+Note it is a plain autoencoder, not variational. The plan specifies "VAE" exactly
+once in 15 pages, in §16's list of alternative *molecular generators* — never
+for the MD embedder, which §3 and §4 call an autoencoder throughout. A KL term
+would also work against this particular use: it shrinks latent distances toward
+the prior, and distance between systems is the quantity being measured.
+
+### 8.1 Benchmark result: it does not beat PCA — FAIL
+
+`scripts/train_nested_ae.py`, per domain, fitting both the AE and the PCA
+baseline on training runs only and scoring on held-out runs:
+
+| Domain | separation PCA | separation AE | stage R² (S1/S2/S3) |
+|---|---|---|---|
+| 1balA00 | 1.62 | 0.65 | +0.35 / +0.31 / +0.02 |
+| 1e8rA00 | 0.44 | 0.43 | +0.40 / +0.58 / +0.09 |
+| 1ha8A00 | 0.16 | 0.32 | +0.29 / +0.58 / +0.02 |
+| **mean** | **0.74** → 29 replicates | **0.47** → 72 replicates | |
+
+Two configurations were tried: a large one (629k–700k parameters, stride 5) and
+a smaller, regularised one (stride 1, dropout 0.1, weight decay 1e-3). Neither
+beat the linear baseline, and tuning was stopped there rather than continued —
+searching hyperparameters until the architecture wins is how one manufactures a
+result.
+
+### 8.2 The informative part: reconstruction improved while separation got worse
+
+Between the two configurations the trajectory-level reconstruction **improved**
+(S2 R² 0.02–0.31 → 0.31–0.58) while the separation ratio **degraded**
+(0.72 → 0.47). The model got better at the objective it was trained on and
+worse at the job it exists to do.
+
+This is the plan's own §7 caveat — "reconstruction alone does not guarantee
+that Euclidean or cosine distance in trajectory latent space corresponds to
+biological similarity" — turned from a caution into a measurement. §7 Option A
+says pure unsupervised reconstruction "should be tested first". It has now been
+tested, and meaningful dynamical states did **not** emerge naturally.
+
+So §7 Options B and C (contrastive learning, triplet loss) are no longer
+optional refinements to try if reconstruction disappoints. They are the next
+step, and the triplet form the plan already writes down is the right one:
+
+```
+d(z_WT1, z_WT2) < d(z_WT1, z_mutant)
+```
+
+with triplets built across **replicates** — two runs of the same system pulled
+together, runs of different systems pushed apart. That objective optimises the
+separation ratio directly, which is also the quantity that sets the replicate
+budget.
+
+### 8.3 Why it could not be rescued by tuning
+
+15 training runs against 629k parameters. Train loss 0.43 versus validation
+0.87 in the regularised configuration, and 0.29 versus 0.91–7.57 in the large
+one. The frame autoencoder never cleared its R² ≥ 0.5 floor on held-out runs
+(best 0.40).
+
+The binding constraint is the number of independent **runs**, not frames and
+not capacity. Windowing multiplies frames, but every window from one trajectory
+carries that trajectory's idiosyncrasy, so it adds no information about
+between-run variation — which is exactly what the trajectory latent has to
+generalise over. This is the same shortage that §4.4 quantified from the other
+direction, and it is the single thing most worth fixing before more modelling.
+
+One consequence for the gate suite: with 2 held-out replicates per condition
+the sham gate (G3) cannot run at all — it needs ≥ 4. Held-out evaluation of a
+learned embedder therefore needs ≥ 6 replicates per cell just to stay testable.
+
+---
+
 ## 7. Status
 
 | Component | State |
@@ -290,10 +383,18 @@ so both halves of the programme share inputs.
 | `WTReference`, `rescue_score` | done, tested |
 | `ThermalAxis`, `thermal_shift` | implemented, **fails validation (§4.3)** |
 | PCA baseline embedder | done |
-| Frame autoencoder | implemented, **not yet benchmarked against baseline** |
+| Nested symmetric AE (time-stamped) | done, tested (15 tests), **loses to PCA — see §8** |
 | p53 trajectories | **not generated** — no MD engine installed |
 
-Next, in order: fix the thermal axis (monotone fit, denser ladder); benchmark
-the autoencoder against PCA on the mdCATH 28 K contrast, targeting separation
-> 1.4; then size the p53 campaign from the separation the winning encoder
-achieves, rather than from the extrapolation in §4.4.
+Next, in order:
+
+1. **Add the metric-learning objective** (plan §7 Option C, triplet over
+   replicates). Pure reconstruction has now been tested and does not produce a
+   discriminative latent (§8.2); this is the evidence-backed next step, not a
+   speculative one.
+2. **Fix the thermal axis** — monotone/sigmoidal rather than linear, denser
+   ladder (§4.3).
+3. **Raise the replicate floor to ≥ 6 per cell**, below which held-out
+   evaluation of a learned embedder is not even testable (§8.3).
+4. Only then size the p53 campaign, from the separation the winning encoder
+   actually achieves rather than from the extrapolation in §4.4.
