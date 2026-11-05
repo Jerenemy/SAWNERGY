@@ -76,11 +76,55 @@ class WTReference:
     cov: np.ndarray
     n_runs: int
     shrinkage: float = 0.0
+    floor: float | None = None
+    n_floor_runs: int = 0
     _inv: np.ndarray | None = field(default=None, repr=False)
+
+    @property
+    def expected_floor(self) -> float:
+        """Analytic floor for this reference's dimension. See `expected_floor`."""
+        return expected_floor(int(self.mean.shape[0]))
+
+    @classmethod
+    def fit_split(cls, Z: np.ndarray, *, frac: float = 0.5,
+                  shrinkage: float | None = None,
+                  rng: np.random.Generator | None = None) -> "WTReference":
+        """Fit on part of the WT runs and calibrate the floor on the rest.
+
+        This is the recommended constructor whenever there are enough WT runs
+        for it (>= 6). The floor has to be measured on runs the covariance was
+        *not* fitted to: a run inside the fit sits closer to its own mean than a
+        fresh run does, so an in-sample floor is biased low, which inflates
+        every rescue score computed against it.
+
+        Args:
+            Z: ``(n_runs, d)`` one embedding per WT run.
+            frac: Fraction of runs used to calibrate the floor.
+        """
+        Z = np.asarray(Z, dtype=np.float64)
+        if Z.ndim != 2:
+            raise ValueError(f"Z must be (n_runs, d); got {Z.shape}")
+        n = Z.shape[0]
+        k = int(round(frac * n))
+        if n - k < 2 or k < 2:
+            raise ValueError(
+                f"fit_split needs >= 2 runs on each side; {n} runs at frac="
+                f"{frac} gives {n - k} and {k}. Use fit() and pass d_wt to "
+                "rescue_score, or collect more wild-type replicates.")
+        rng = rng or np.random.default_rng(0)
+        order = rng.permutation(n)
+        ref = cls.fit(Z[order[k:]], shrinkage=shrinkage)
+        held = np.asarray(ref.distance(Z[order[:k]])).ravel()
+        ref.floor = float(held.mean())
+        ref.n_floor_runs = int(k)
+        return ref
 
     @classmethod
     def fit(cls, Z: np.ndarray, *, shrinkage: float | None = None) -> "WTReference":
         """Estimate the WT mean and covariance from run-level embeddings.
+
+        The result has no calibrated ``floor``; prefer `fit_split` when there
+        are enough wild-type runs, or pass ``d_wt`` to `rescue_score`.
 
         Args:
             Z: ``(n_runs, d)`` one embedding per WT run.
@@ -139,9 +183,48 @@ class WTReference:
         return out if out.size > 1 else out
 
 
+def expected_floor(d: int) -> float:
+    """Mean distance of a sample drawn from its *own* ``d``-dimensional
+    reference distribution.
+
+    A Mahalanobis distance is not zero for a run that genuinely belongs to the
+    reference. Whitened residuals are standard normal, so the distance follows a
+    chi distribution with ``d`` degrees of freedom, whose mean is
+
+        sqrt(2) * Gamma((d+1)/2) / Gamma(d/2)   ~   sqrt(d - 0.5)
+
+    In 32 dimensions that is 5.61, not 0. This is the irreducible floor of the
+    metric, and it is why `rescue_score` needs two anchors rather than one.
+    """
+    if d < 1:
+        raise ValueError(f"dimension must be >= 1; got {d}")
+    from math import exp, lgamma, log
+    return exp(0.5 * log(2.0) + lgamma((d + 1) / 2) - lgamma(d / 2))
+
+
 def rescue_score(z: np.ndarray, wt: WTReference, d_baseline: float, *,
+                 d_wt: float | None = None,
                  metric: str = "mahalanobis") -> np.ndarray:
-    """``R = 1 - D_WT(z) / D_WT(baseline)``.
+    """Restoration on a scale anchored at **both** ends.
+
+        R = (D_baseline - D_WT(z)) / (D_baseline - D_WT_floor)
+
+    An untreated mutant scores 0; a run indistinguishable from wild type scores
+    1.
+
+    **Why not the ratio form.** The pipeline document writes this as
+    ``R = 1 - D_WT(z)/D_baseline``, which assumes a wild-type run sits at
+    ``D = 0``. It cannot -- see `expected_floor`. A WT run sits at about
+    ``sqrt(d)``, so the top of that scale is unreachable by construction.
+    Measured on 113 wild-type SARS-CoV-2 RBD trajectories in a 32-dimensional
+    embedding, held-out WT runs sat at ``D = 5.50`` against an expected floor
+    of 5.61, and the ratio form scored *wild type itself* at +0.39 rather than
+    1.0.
+
+    The error is affine in ``D``, so it never changed the **ranking** of two
+    compounds. It made every absolute statement wrong, and made scores from
+    embeddings of different dimension incomparable, because the compression
+    factor depends on ``sqrt(d)/D_baseline``.
 
     Args:
         z: Embedding(s) of the treated system.
@@ -149,16 +232,37 @@ def rescue_score(z: np.ndarray, wt: WTReference, d_baseline: float, *,
         d_baseline: ``D_WT`` of the *untreated* mutant, averaged over its
             replicates. Using a single baseline trajectory here propagates that
             run's idiosyncrasy into every compound's score.
+        d_wt: The floor -- mean ``D_WT`` of wild-type runs **held out of**
+            ``wt``'s own fit. Falls back to ``wt.floor`` when the reference was
+            built with `WTReference.fit_split`, then to `expected_floor`, which
+            assumes normality and ignores covariance shrinkage. Measure it when
+            you can.
 
     Returns:
         ``R`` -- 0 is no rescue, 1 is full restoration, negative means the
-        compound pushed the dynamics further from wild type.
+        system sits further from wild type than the untreated mutant does.
     """
     if d_baseline <= 0:
         raise ValueError("baseline distance must be positive; if the untreated "
                          "mutant sits on top of WT there is no deficit to rescue "
                          "and the ratio is undefined")
-    return 1.0 - wt.distance(z, metric=metric) / d_baseline
+    if d_wt is None:
+        d_wt = wt.floor
+    if d_wt is None:
+        d_wt = expected_floor(int(wt.mean.shape[0]))
+        _logger.warning(
+            "rescue_score is using the analytic floor %.3f for d=%d because this "
+            "reference was not calibrated on held-out WT runs. Build it with "
+            "WTReference.fit_split, or pass d_wt, to use the measured floor.",
+            d_wt, int(wt.mean.shape[0]))
+    if d_baseline <= d_wt:
+        raise ValueError(
+            f"baseline distance {d_baseline:.4g} does not exceed the wild-type "
+            f"floor {d_wt:.4g}: in this embedding the untreated mutant is not "
+            f"distinguishable from wild type, so there is no deficit to rescue "
+            f"and the scale has no span. Fix the representation or add "
+            f"replicates before scoring compounds.")
+    return (d_baseline - wt.distance(z, metric=metric)) / (d_baseline - d_wt)
 
 
 # ---------------------------------------------------------------------------

@@ -490,3 +490,165 @@ Next, in order:
    evaluation of a learned embedder is not even testable (§8.3).
 4. Only then size the p53 campaign, from the separation the winning encoder
    actually achieves rather than from the extrapolation in §4.4.
+
+---
+
+## 10. Validation on a real WT-vs-mutant panel (SARS-CoV-2 RBD)
+
+Sections 4 and 8 validated on mdCATH, where **temperature** stood in for the
+mutation because no public MD dataset paired a wild type with point mutants at
+replicate scale. One does: Folding@home project **17311**, the RBD:ACE2 complex
+with glycosylation, AMBER14SB/TIP3P, 310 K NPT, frames every 0.5 ns, on the AWS
+Open Data Registry under
+`fah-public-data-covid19-antibodies/vir-collaboration/SARS-CoV-2-ACE2-RBD/`.
+
+| FAH RUN | System | Role | Sequence check |
+|---|---|---|---|
+| run3 | WT | reference | LYS417 / ASN439 |
+| run0 | N439K | baseline | LYS417 / **LYS**439 |
+| run1 | K417V | baseline | **VAL**417 / ASN439 |
+| run2 | N439K+K417V | baseline | **VAL**417 / **LYS**439 |
+
+The RBD chain is **193 residues** against the p53 DBD's 195, and there are
+thousands of velocity-independent clones per variant. 473 clones were pulled,
+473 extracted cleanly, **444 usable** after requiring 180 frames past a 10%
+burn-in: 113 WT, 107 N439K, 111 K417V, 113 double. Residue 417 and 439 identity
+is read from each trajectory's own topology, so grouping does not rest on the
+deposit's README.
+
+Trajectory length is **independent of system** (F = 0.38, p = 0.77), as it must
+be: FAH work-unit length depends on which volunteer's GPU took the job.
+
+### 10.1 Representation: no patch pooling
+
+The §9.3 diagnosis said patch pooling — needed to compare *different* proteins —
+discards residue identity, which is most of the within-protein signal. With one
+protein and one numbering there is no reason to pool, so features here are
+**full residue-pair contact descriptors**, 18,145 pairs with |i−j| > 3.
+
+Of those, only **2,049 vary between runs at all**; the other 16,096 are pairs
+that never form a contact in any of 444 trajectories. Selecting on training runs
+only (never on held-out runs, which would leak the difference being measured)
+cuts the autoencoder's input width by 88.7% and its parameter count from 19M to
+2.5M.
+
+### 10.2 The gate ladder — PASS except effect size
+
+| Gate | Result | |
+|---|---|---|
+| G1 features | 27.1% of 18,145 dims vary, 444 runs | PASS |
+| G2 replicate noise | within-system run-to-centroid distance 1.187 | PASS |
+| G3 sham | **FPR 0.025** over 40 sham splits (α = 0.05) | PASS |
+| G4 separability | ICC 0.115, F = 15.4, p = 0.000999; LORO 0.815 vs chance 0.255 | PASS |
+| G5 effect size | WT vs double **d = 0.36**; need 119 replicates, have 113 | FAIL |
+
+G3 is the important one: the sham test now passes on a **real mutation** rather
+than a temperature contrast.
+
+### 10.3 The replicate requirement, confirmed without extrapolation
+
+§4.4 extrapolated a temperature curve down to the Y220C-sized effect and got
+*d ≈ 0.43 → ~87 replicates*, flagged as a lower bound resting on an assumption.
+Measured here on two real point mutations: **d = 0.36 → ~121 replicates**.
+
+Different protein, real substitutions, no sigmoid extrapolation anywhere — and
+the same regime, slightly worse. Two point mutations move a protein's contact
+ensemble by about **a third of its own run-to-run noise**. The replicate budget
+in §4.4 was not an artifact of the temperature proxy.
+
+### 10.4 The autoencoder finally does not lose — PASS (narrowly)
+
+Evaluated on 111 held-out runs, split at run level:
+
+| | LORO (held-out runs) | ICC(system) | AUC WT vs N439K | AUC WT vs K417V |
+|---|---|---|---|---|
+| PCA(32) | 0.856 | +0.204 | 0.956 (0.987 at d=12) | 0.870 (0.884 at d=16) |
+| Nested AE(32) | 0.856 | +0.198 | **0.995** | **0.899** |
+
+A dead tie on four-way classification; the AE ahead on per-run discrimination
+along the rescue axis (d′ 3.83 vs 2.11). This is the first benchmark in which
+the autoencoder is not beaten by PCA (contrast §8.1 and §9.2), and the only
+thing that changed is dropping the cross-protein pooling.
+
+Reconstruction and discrimination stayed **decoupled**, as in §8.2: validation
+R² fell +0.46 → +0.37 → **+0.079** across the three training stages while
+discrimination held. Reconstruction remains the wrong objective.
+
+### 10.5 A calibration bug in `rescue_score` — FIXED
+
+`rescue_score` computed `R = 1 − D_WT(z)/D_baseline`, which assumes a wild-type
+run sits at `D = 0`. **It cannot.** Whitened residuals are standard normal, so a
+Mahalanobis distance follows a chi distribution with `d` degrees of freedom,
+mean `sqrt(2)·Γ((d+1)/2)/Γ(d/2) ≈ sqrt(d − 0.5)`.
+
+Measured: in 32 dimensions the analytic floor is **5.613**; held-out WT runs sat
+at **5.446** (PCA) and **4.928** (AE). The old formula therefore scored *wild
+type itself* at **+0.39**, on a scale where 1.0 means fully restored.
+
+The error is affine in `D`, so it never changed the **ranking** of two
+compounds. It made every absolute statement wrong, and made scores from
+embeddings of different dimension incomparable, because the compression factor
+is `sqrt(d)/D_baseline`.
+
+Fixed by anchoring both ends:
+
+    R = (D_baseline − D_WT(z)) / (D_baseline − D_WT_floor)
+
+- `expected_floor(d)` gives the analytic floor.
+- `WTReference.fit_split` fits the covariance on half the WT runs and measures
+  the floor on the other half. The floor **must** be out of sample: a run inside
+  the fit sits closer to its own mean than a fresh run does, so an in-sample
+  floor is biased low and inflates every score.
+- `rescue_score` now takes `d_wt`, falls back to a calibrated `wt.floor`, then
+  to the analytic floor with a warning, and **refuses** a baseline that does not
+  exceed the floor — the case where there is no measurable deficit to rescue.
+
+How it escaped: `test_rescue_score_bounds` asserted that `wt.mean` scores ≈ 1.
+The mean is the single point where `D = 0`, so the test encoded the same wrong
+assumption as the code. It now asserts that a *held-out WT run* scores ≈ 1, and
+a regression guard checks the old form visibly undershoots.
+
+### 10.6 The floor is the binding constraint
+
+span / floor = **0.64** (PCA) and 0.47 (AE): the entire WT-to-double-mutant
+signal is *smaller than the measurement floor*. Since the floor goes as
+`sqrt(d)` while the signal does not, dimension is a tunable:
+
+| d | 2 | 4 | 8 | **12** | 16 | 24 | 32 |
+|---|---|---|---|---|---|---|---|
+| PCA span/floor | 0.331 | 0.460 | 0.657 | **0.726** | 0.715 | 0.678 | 0.640 |
+| PCA AUC (N439K) | 0.965 | 0.978 | 0.970 | **0.987** | 0.982 | 0.967 | 0.956 |
+
+**Use d ≈ 12 for the PCA embedding, not 32.** For the autoencoder, truncation is
+meaningless — its latent dimensions have no canonical ordering, and cutting to
+d = 2 maximises span/floor (0.792) while destroying AUC (0.712). Use all 32.
+
+### 10.7 Dose ordering fails, because the premise is wrong
+
+The test "WT < single < double" **fails**: N439K alone sits further from WT
+(12.54) than the double mutant carrying both substitutions (9.03). Additivity
+check: `‖v₁+v₂‖` vs `‖v₁₂‖` ratio **0.40**, cosine **+0.49**. The double mutant
+is not the vector sum of its parts — K417V partially compensates N439K. That is
+epistasis, and nothing requires two substitutions to perturb a contact ensemble
+additively, so the test cannot separate "the metric is wrong" from "the
+assumption is wrong".
+
+Replaced with a test that needs no additivity: project each run onto the
+WT→double axis. PCA gives WT 0.000, **K417V +0.264**, N439K +0.969, double
+1.000 — the partial variant lands cleanly between the anchors. For p53 this is
+the better-posed test anyway: a compound either moves the mutant along the
+measured deficit axis or it does not.
+
+### 10.8 What this changes for p53
+
+1. **Drop patch pooling.** Build the p53 representation from full residue-pair
+   descriptors. §9.3 argued it; this measures it.
+2. **Use d ≈ 12**, not 32, for a PCA embedding.
+3. **Score with the two-anchor `R`**, and calibrate the floor on held-out WT
+   replicates.
+4. **Test rescue by projection onto the WT→Y220C axis**, not by total distance,
+   and never assume additivity across perturbations.
+5. **Budget ~120 replicates per system**, not 87. The extrapolation was
+   optimistic by ~40%.
+6. Still untested, and still the thing the programme rests on: whether any of
+   these geometric quantities correlates with a measured ΔTm.

@@ -183,9 +183,65 @@ class TestMetrics:
         rng = np.random.default_rng(1)
         wt = WTReference.fit(rng.normal(size=(20, 4)))
         d_base = float(wt.distance(wt.mean + 10.0)[0])
-        assert rescue_score(wt.mean, wt, d_base)[0] == pytest.approx(1.0, abs=0.2)
+        assert rescue_score(wt.mean, wt, d_base)[0] > 1.0   # the mean is below the floor
         far = rescue_score(wt.mean + 20.0, wt, d_base)[0]
         assert far < 0
+
+    def test_expected_floor_matches_simulation(self):
+        """The analytic floor must match what real samples actually do."""
+        from sawnergy.md.metrics import expected_floor
+        rng = np.random.default_rng(0)
+        for d in (2, 8, 32):
+            wt = WTReference.fit(rng.normal(size=(4000, d)), shrinkage=0.0)
+            emp = np.asarray(wt.distance(rng.normal(size=(4000, d)))).mean()
+            assert emp == pytest.approx(expected_floor(d), rel=0.05), (
+                f"d={d}: empirical {emp:.3f} vs analytic {expected_floor(d):.3f}")
+            if d >= 8:   # the sqrt(d-0.5) shorthand is only good for larger d
+                assert expected_floor(d) == pytest.approx(np.sqrt(d - 0.5),
+                                                          rel=0.01)
+
+    def test_held_out_wild_type_scores_one(self):
+        """The bug this replaces: a real WT run must score ~1, not ~0.4.
+
+        The old ratio form divided by the baseline alone, implicitly assuming a
+        wild-type run sits at D=0. It sits at ~sqrt(d), so wild type scored far
+        below 1 on its own scale.
+        """
+        rng = np.random.default_rng(3)
+        Z_wt = rng.normal(size=(60, 16))
+        wt = WTReference.fit_split(Z_wt, rng=np.random.default_rng(1))
+        assert wt.floor is not None and wt.n_floor_runs == 30
+        d_base = float(np.asarray(
+            wt.distance(rng.normal(size=(40, 16)) + 3.0)).mean())
+
+        fresh = rng.normal(size=(50, 16))
+        R = np.asarray(rescue_score(fresh, wt, d_base)).mean()
+        assert R == pytest.approx(1.0, abs=0.15), f"WT scored {R:.3f}"
+
+        # what the uncorrected form would have reported on the same data
+        R_old = float(np.asarray(1.0 - wt.distance(fresh) / d_base).mean())
+        assert R_old < 0.75, (
+            "regression guard: the ratio form should visibly undershoot")
+
+    def test_rescue_score_refuses_a_baseline_inside_the_floor(self):
+        rng = np.random.default_rng(5)
+        wt = WTReference.fit_split(rng.normal(size=(40, 8)))
+        with pytest.raises(ValueError, match="floor"):
+            rescue_score(wt.mean, wt, float(wt.floor) * 0.5)
+
+    def test_fit_split_floor_is_not_biased_low(self):
+        """An in-sample floor is smaller than an out-of-sample one."""
+        rng = np.random.default_rng(7)
+        Z = rng.normal(size=(40, 12))
+        ref = WTReference.fit_split(Z, rng=np.random.default_rng(2))
+        in_sample = float(np.asarray(ref.distance(Z)).mean())
+        assert ref.floor >= in_sample * 0.95, (
+            f"held-out floor {ref.floor:.3f} should not sit below the "
+            f"in-sample mean {in_sample:.3f}")
+
+    def test_fit_split_refuses_too_few_runs(self):
+        with pytest.raises(ValueError, match="each side"):
+            WTReference.fit_split(np.random.default_rng(0).normal(size=(3, 4)))
 
     def test_rescue_score_rejects_zero_baseline(self):
         wt = WTReference.fit(np.random.default_rng(0).normal(size=(10, 3)))
