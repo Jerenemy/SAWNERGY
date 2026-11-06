@@ -33,11 +33,16 @@ from .features import (RunDescriptor, contact_map, frame_tensor,
                        frame_vectors, pair_distances, patch_frame_vectors,
                        patch_neighbourhoods, patch_vectors, run_descriptor,
                        seq_separation_mask)
+from .atomic import (AtomTable, BURIAL_R, burial, cb_coords,
+                     dihedral_features, mutation_mask, residue_min_distance,
+                     sidechain_centroids)
+from .temporal import TICA, autocorrelation, fluctuation, lifetime
 from .stats import (Discriminability, VarianceComponents, autocorrelation_time,
                     leave_one_replicate_out, replicates_required,
                     separation_ratio, two_way_components, variance_components)
 from .metrics import (DELTA_TM_K, ThermalAxis, ThermalShift, WTReference,
-                      rescue_score, thermal_rescue_K, thermal_shift)
+                      expected_floor, rescue_score, thermal_rescue_K,
+                      thermal_shift)
 from .encoder import (PCAEmbedder, TrainConfig, TrajectorySetEncoder,
                       build_frame_autoencoder, encode_frames,
                       train_frame_autoencoder)
@@ -64,13 +69,18 @@ __all__ = [
     "pair_distances", "patch_frame_vectors", "patch_neighbourhoods",
     "patch_vectors",
     "run_descriptor", "seq_separation_mask",
+    # atomic (all-atom residue geometry)
+    "AtomTable", "BURIAL_R", "burial", "cb_coords", "dihedral_features",
+    "mutation_mask", "residue_min_distance", "sidechain_centroids",
+    # temporal
+    "TICA", "autocorrelation", "fluctuation", "lifetime",
     # stats
     "Discriminability", "VarianceComponents", "autocorrelation_time",
     "leave_one_replicate_out", "replicates_required", "separation_ratio",
     "two_way_components", "variance_components",
     # metrics
     "DELTA_TM_K", "ThermalAxis", "ThermalShift", "WTReference",
-    "rescue_score", "thermal_rescue_K", "thermal_shift",
+    "expected_floor", "rescue_score", "thermal_rescue_K", "thermal_shift",
     # encoder
     "PCAEmbedder", "TrainConfig", "TrajectorySetEncoder",
     "build_frame_autoencoder", "encode_frames", "train_frame_autoencoder",
