@@ -37,6 +37,8 @@ from .atomic import (AtomTable, BURIAL_R, burial, cb_coords,
                      dihedral_features, mutation_mask, residue_min_distance,
                      sidechain_centroids)
 from .temporal import TICA, autocorrelation, fluctuation, lifetime
+from .states import (MarkovStates, TRANSITION_PRIOR, kmeans,
+                     multinomial_noise)
 from .stats import (Discriminability, VarianceComponents, autocorrelation_time,
                     leave_one_replicate_out, replicates_required,
                     separation_ratio, two_way_components, variance_components)
@@ -74,6 +76,8 @@ __all__ = [
     "mutation_mask", "residue_min_distance", "sidechain_centroids",
     # temporal
     "TICA", "autocorrelation", "fluctuation", "lifetime",
+    # states (shared conformational state populations)
+    "MarkovStates", "TRANSITION_PRIOR", "kmeans", "multinomial_noise",
     # stats
     "Discriminability", "VarianceComponents", "autocorrelation_time",
     "leave_one_replicate_out", "replicates_required", "separation_ratio",
