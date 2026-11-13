@@ -652,3 +652,243 @@ measured deficit axis or it does not.
    optimistic by ~40%.
 6. Still untested, and still the thing the programme rests on: whether any of
    these geometric quantities correlates with a measured ΔTm.
+
+---
+
+## 11. Is the ceiling the *marginals*? (stage H)
+
+Stage G varied which quantity was measured — side-chain contacts, closest
+heavy-atom approach, dihedrals, burial, contact kinetics, TICA — and none of
+the eight arms beat time-averaged Cα–Cα contact occupancy on K417V, the one
+contrast nothing in this programme has been able to see. It concluded that the
+limit is the sampling depth rather than the representation.
+
+That conclusion has a gap. Every one of those eight arms was a **marginal**: a
+per-pair or per-residue average over frames. Marginals are blind to
+correlation, and the blindness is not subtle. Take two contacts, A and B, each
+formed half the time. One run flips between *both formed* and *neither
+formed*; the other flips between *A only* and *B only*. The occupancy vector is
+`[0.5, 0.5]` for both. They are visiting entirely different sets of shapes, and
+no quantity of additional marginal features recovers the difference, because
+the difference lives in the joint distribution and not in any one feature's
+mean.
+
+Stage H replaces the descriptor with a conformational **state population**
+vector. Frames are clustered once into a shared set of discrete states and each
+run is described by the fraction of its time spent in each. That is still
+order-free — §2.1's argument stands, an order-aware descriptor would latch onto
+the run-specific drift that distinguishes replicates — but it is a description
+of the joint distribution rather than of each coordinate separately. It is also
+the only descriptor in this package that is *interpretable*: "wild type spends
+60% of its time in the closed-pocket state and the mutant 20%" is a sentence a
+structural biologist can argue with, which the 18,000 anonymous contact
+occupancies are not.
+
+Two routes are tested, in `states` and in `vampnet`.
+
+### 11.1 The classical route: TICA + k-means — FAIL
+
+`sawnergy.md.states` does it the standard way: project onto the slow modes with
+`TICA`, cluster the projections with k-means fitted on **training frames
+only**, then score each run against those fixed centres. The clustering being
+shared and fixed is what makes the descriptor open-set, and therefore usable
+for a compound-bound trajectory that did not exist when the states were
+defined. k-means is hand-rolled, as `TICA` and the stage scripts' PCA already
+are, so this adds no dependency.
+
+`scripts/fah_rbd_stage_h.py` **imports** stage G's loader, masking, train/held-out
+split, column selection, standardisation, PCA and scoring rather than
+re-implementing any of it, so the arms cannot drift from stage G's. It
+reproduces stage G's masked Cα baseline exactly — d(K417V) 0.523, d(N439K)
+0.552, LORO 0.6306 — which is the check that the protocol really is frozen. The
+arm grid is pre-registered in the script's docstring and reported in full,
+including the arms that lose; §8.3's note applies, and searching until the new
+method wins is how one manufactures a result.
+
+| Arm (masked) | d(WT vs K417V) | vs Cα | d(WT vs N439K) | LORO |
+|---|---|---|---|---|
+| **ca** — the baseline | 0.523 | — | 0.552 | 0.631 |
+| msm100 | 0.517 | −0.007 | 0.621 | 0.595 |
+| msm50 | 0.513 | −0.010 | 0.608 | 0.559 |
+| msm50-raw (no Hellinger) | 0.512 | −0.012 | 0.607 | 0.559 |
+| msm25 | 0.483 | −0.040 | 0.574 | 0.505 |
+| msm50-hard | 0.431 | −0.093 | 0.434 | 0.523 |
+| msm10 | 0.451 | −0.073 | 0.412 | 0.369 |
+| msm10+trans | 0.334 | −0.189 | 0.320 | 0.306 |
+| ca+msm50 | 0.525 | +0.001 | 0.559 | 0.631 |
+
+**No state arm beats Cα occupancy.** The best, msm100, is 0.007 *below* it and
+costs 0.036 of LORO. Concatenating the populations onto Cα moves d(K417V) by
++0.001 and LORO not at all, which is the informative version of the result: the
+joint descriptor is not trading one kind of information for another, it is
+adding nothing Cα did not already have.
+
+Transition matrices are actively harmful — LORO 0.306, span/floor −0.015 — and
+should be, since a 90-frame run at lag 1 offers 89 transitions to fill `k²`
+entries, so anything past `k ≈ 10` is mostly prior. `populations` is the
+descriptor to reach for; `transition_matrix` is in the package for completeness
+and for non-equilibrium use, not for this.
+
+Two findings that are not negative:
+
+- **Soft assignment beats hard** by a wide margin: 0.513 against 0.431, LORO
+  0.559 against 0.523. At fixed `T` a kernel-weighted membership is a
+  lower-variance estimator of the same populations than a hard count, and that
+  variance is the denominator of every separation ratio here. Hence
+  `soft=True` is the default. The Hellinger transform, by contrast, makes
+  essentially no difference (0.513 vs 0.512) and is left available rather than
+  recommended.
+- **The best arm in the stage is a dimension change, not a feature change.**
+  Cα reduced to d = 25 gives d(K417V) 0.535 at identical LORO, and Cα at d = 10
+  lifts d(N439K) from 0.552 to 0.850. This is §10.6's √d floor again — the
+  floor grows with dimension while the signal does not — and it is free. It
+  also means a k-state arm with k < 32 is confounded with a dimension change,
+  which is why the `ca@d` controls exist and why any comparison against a
+  10-state arm must use `ca@10` and not `ca`.
+
+### 11.2 Why this null is different from stage G's
+
+Stage G attributed its null to the sampling depth: 90 frames at 1 ns spacing.
+The obvious reading of stage H is the same, since a population is a multinomial
+proportion with standard error `sqrt(p(1-p)/T)`, and at `T = 90` with `k = 50`
+that error is the same order as the population itself. `multinomial_noise`
+exists to report exactly that.
+
+Measured, it does not hold. The multinomial standard error is **0.22–0.27 of
+the hard-assignment run-to-run scatter** across every `k` tried, in both the
+masked and unmasked arms. Counting noise is a fifth of the between-run spread,
+not the bulk of it. (The comparison has to be made against the *hard*
+scatter: the closed form is the sampling noise of a count, and soft assignment
+is a smoothed estimator of the same populations whose scatter is 25–30× smaller,
+so quoting the count noise against the soft scatter overstates the problem by
+whatever the smoothing buys. An earlier version of this diagnostic did exactly
+that and read 5.7–8.4 instead of 0.22–0.27.)
+
+So the denominator that defeats the state descriptor is **real
+replicate-to-replicate ensemble heterogeneity**, not finite-sample counting
+error. Two runs of the same system genuinely populate the conformational states
+differently, by much more than their frame counts explain. That is a different
+problem from stage G's, and a harder one: longer trajectories fix counting
+noise, and do not obviously fix genuine heterogeneity between independent
+replicates. What addresses it is a representation that is *built* to be
+invariant to it — which is what §11.3 tests.
+
+### 11.3 The learned route: VAMPnets — the first gain on K417V, and it does not quite clear the bar
+
+The classical route is linear twice over: TICA finds directions of maximal
+autocorrelation under a linear model, and k-means partitions them under an
+isotropic-variance assumption. If the slow coordinate is a nonlinear function
+of the dihedrals — a torsion flip, a pocket opening — TICA must approximate it
+with a linear combination and the clustering cannot recover what was lost.
+
+`sawnergy.md.vampnet` replaces both with one network mapping a frame to a soft
+assignment over `k` states, trained to maximise the **VAMP-2 score** (Mardt et
+al., *Nat. Commun.* 9:5, 2018): a variational bound on how much of the lag-τ
+dynamics the assignment resolves. This is the first objective tried in this
+package that is not a proxy for the quantity of interest. §8.2 records what a
+reconstruction objective bought — reconstruction improved while separation got
+*worse* — and PCA keeps tying because variance is the same wrong target. Slow
+modes are not high-variance modes.
+
+The network is fed the shared linear pre-reduction, not TICA's output: handing
+it TICA's coordinates would concede in advance the step it exists to replace.
+Everything downstream is the frozen protocol.
+
+**What is deliberately absent is a system-label objective.** Stage G measured
+why: masking the substituted residues and their 8 Å shell costs Cα LORO 0.883 →
+0.631, so most of the apparent WT-vs-mutant signal *is* the substituted
+residue. A contrastive loss trained on system labels would find that feature,
+because it is perfectly predictive and trivially learnable — and it is the one
+feature a compound can never change, so every such model would score every
+compound as unrescued. VAMP-2 never sees a label; it sees pairs of frames from
+one trajectory, so its objective is available for a compound-bound run that did
+not exist at training time. The descriptor stays open-set.
+
+Three disciplines, fixed before the numbers: a pre-registered grid (`k` ∈
+{10, 50}, three seeds, one architecture, no search); every fit reported as
+mean ± sd across seeds, since a neural result from one seed is not a
+measurement; and early stopping on an inner split of the **training** runs, so
+the 111 held-out runs take part in no fitting decision, including when to stop.
+
+| Arm (masked) | d(K417V) | d(N439K) | LORO | AUC_K417V |
+|---|---|---|---|---|
+| **ca** (d = 32) | 0.523 | 0.552 | 0.631 | **0.891** |
+| ca@10 (d = 10) | 0.518 | 0.850 | 0.478 | 0.864 |
+| msm50 (TICA + k-means) | 0.513 | 0.608 | 0.559 | 0.773 |
+| vamp10 (d = 10) | **0.770** ± 0.051 | 0.862 ± 0.258 | 0.577 ± 0.117 | 0.848 ± 0.035 |
+| vamp50 (d = 32) | 0.710 ± 0.041 | 0.819 ± 0.042 | **0.649** ± 0.024 | 0.846 ± 0.009 |
+
+**The K417V gain is real and is not a dimension artifact.** Against the
+dimension-matched baseline, vamp10 is +0.252 over `ca@10` and vamp50 is +0.186
+over `ca`. The separation is the quantity that sets the budget — `n ≈ 16/d²` —
+so 0.523 → 0.710 is 58 replicates down to 32, and → 0.770 is 27.
+
+The dimension control earns its place here, because it kills half the result.
+**The N439K gain is almost entirely a dimension effect**: `ca@10` reaches 0.850
+for free, above both VAMPnet arms, so nothing about the learned decomposition
+is responsible for it. K417V is the opposite — `ca` at d = 10 gives 0.518 and
+at d = 25 gives 0.535, so the dimension does nothing there, and the VAMPnet's
+0.71–0.77 is genuinely beyond what any reduction of Cα occupancy achieves. This
+is the first arm in the programme to move the contrast that nothing could move.
+
+**It does not clear a conventional bar.** All arms are scored on the same 111
+held-out runs, so the comparison is paired and the uncertainty on the
+*difference* is far smaller than the ≈ 0.28 standard error on a single `d`; a
+paired bootstrap over held-out runs (2,000 resamples, both arms rescored on each
+resample) is the honest version of the question:
+
+| Arm | seed | Δd(K417V) | 95% CI | p(Δ ≤ 0) |
+|---|---|---|---|---|
+| vamp10 vs ca@10 | 0 | +0.285 | [+0.087, +0.498] | 0.0040 |
+| | 1 | +0.213 | [+0.002, +0.456] | 0.0250 |
+| | 2 | +0.187 | [−0.020, +0.404] | 0.0405 |
+| vamp50 vs ca | 0 | +0.140 | [−0.064, +0.349] | 0.0865 |
+| | 1 | +0.209 | [−0.005, +0.433] | 0.0300 |
+| | 2 | +0.144 | [−0.050, +0.350] | 0.0760 |
+
+Every seed of both arms is positive, which is itself evidence, but only two of
+six have a confidence interval excluding zero and vamp50's worst seed sits at
+p = 0.087. The status is **suggestive, not established**. Reporting it as a
+win would be the same error §8.1 declined to make in the other direction.
+
+There is also a cost that does not go away: **AUC falls** — 0.846–0.848 against
+Cα's 0.891 — while `d` rises. This is the third appearance of that pattern, after
+stage F's within-class whitening, and the consistent reading is that these
+methods tighten replicate scatter, which is `d`'s denominator, without adding
+discriminative information. Cheaper replicates, not better ranking. Compound
+scoring is a ranking problem, so the thing being improved is not quite the thing
+that is needed.
+
+Two practical notes from building it. The VAMP-2 score is invariant to any
+invertible linear map of the assignment, so it pins down the slow *subspace* and
+says nothing about scale: a near-uniform softmax whose small variations point
+the right way scores exactly as well as a sharp partition. The standardisation
+in the stage pipeline removes the ambiguity, but it means the interpretability
+§11 claims for a clustered state model — "60% of the time in the closed state" —
+does **not** transfer to the learned one. And a softmax starts near-uniform,
+which is a dead local optimum of the score: the covariance is near rank-one and
+the gradient through the whitening nearly vanishes. Roughly one fit in six
+collapsed there even with a trace-relative ridge, so `fit_vampnet` restarts
+`n_init` times and keeps the best by inner-validation score, the same remedy
+`kmeans` applies to the same class of problem, and `VampReport.collapsed`
+flags the case explicitly — a collapsed fit and a signal-free process both score
+zero, and only one of those is a statement about the data.
+
+### 11.4 What stage H changes
+
+1. **Drop the state-population descriptor as a replacement for Cα occupancy.**
+   Clustered populations lose on every contrast, and adding them to Cα adds
+   nothing (+0.001 on K417V, LORO unchanged).
+2. **Take the dimension for free.** Cα at d = 25 beats Cα at d = 32 on K417V at
+   identical LORO, and d = 10 lifts N439K from 0.552 to 0.850. Any future arm
+   must be compared against a dimension-matched baseline or the comparison is
+   meaningless.
+3. **Keep the VAMPnet, and settle it.** It is the first thing to move K417V
+   beyond what dimension explains, at `p` between 0.004 and 0.087 depending on
+   seed. More seeds and a held-out set larger than 111 runs would settle it;
+   both are cheap compared with what is being decided.
+4. **Do not train on system labels.** The open-set requirement and stage G's
+   masking result both forbid it, independently.
+5. **The denominator remains the target.** Three methods have now raised `d` by
+   tightening replicate scatter without raising AUC. The quantity that
+   compound ranking needs has not moved since stage B.

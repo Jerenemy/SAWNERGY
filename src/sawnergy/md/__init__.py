@@ -39,6 +39,9 @@ from .atomic import (AtomTable, BURIAL_R, burial, cb_coords,
 from .temporal import TICA, autocorrelation, fluctuation, lifetime
 from .states import (MarkovStates, TRANSITION_PRIOR, kmeans,
                      multinomial_noise)
+from .vampnet import (COLLAPSE_SCORE, VampConfig, VampReport, build_vampnet,
+                      fit_vampnet, lagged_pairs, soft_populations,
+                      vamp2_score)
 from .stats import (Discriminability, VarianceComponents, autocorrelation_time,
                     leave_one_replicate_out, replicates_required,
                     separation_ratio, two_way_components, variance_components)
@@ -78,6 +81,9 @@ __all__ = [
     "TICA", "autocorrelation", "fluctuation", "lifetime",
     # states (shared conformational state populations)
     "MarkovStates", "TRANSITION_PRIOR", "kmeans", "multinomial_noise",
+    # vampnet (a learned state decomposition)
+    "COLLAPSE_SCORE", "VampConfig", "VampReport", "build_vampnet",
+    "fit_vampnet", "lagged_pairs", "soft_populations", "vamp2_score",
     # stats
     "Discriminability", "VarianceComponents", "autocorrelation_time",
     "leave_one_replicate_out", "replicates_required", "separation_ratio",
